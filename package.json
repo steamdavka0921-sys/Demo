@@ -1,0 +1,10 @@
+{
+  "name": "eegiidemobot",
+  "version": "1.0.0",
+  "description": "Telegram bot on Netlify",
+  "main": "index.js",
+  "dependencies": {},
+  "devDependencies": {
+    "netlify-cli": "^17.0.0"
+  }
+}
