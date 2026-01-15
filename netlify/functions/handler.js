@@ -1,73 +1,137 @@
-// ... (өмнөх callTelegram, callFirestore функцууд хэвээрээ)
+const https = require('https');
 
-      else if (data.startsWith("paid_")) {
-        const [_, gId, tCode] = data.split("_");
+exports.handler = async (event) => {
+  if (event.httpMethod !== "POST") return { statusCode: 200, body: "OK" };
+
+  const TOKEN = process.env.BOT_TOKEN;
+  const ADMIN_ID = process.env.ADMIN_CHAT_ID;
+  const FIREBASE_ID = process.env.FIREBASE_PROJECT_ID;
+  const API_KEY = process.env.FIREBASE_API_KEY;
+  const BOT_USERNAME = "Таны_Ботны_Нэр_Бот"; // Энд ботныхоо username-г бичээрэй
+
+  const WITHDRAW_PHOTO = "https://res.cloudinary.com/dpdsuhwa9/image/upload/v1767338251/fljqkzsqe4rtkhijsdsq.jpg";
+  const LOADING_GIF = "https://res.cloudinary.com/dpdsuhwa9/image/upload/v1767404699/zzxmv9nclwgk5jw259na.gif";
+
+  // Telegram ба Firestore туслах функцууд (Өмнөхтэй адил)
+  const callTelegram = async (method, params) => {
+    const data = JSON.stringify(params);
+    const options = {
+      hostname: 'api.telegram.org', port: 443, path: `/bot${TOKEN}/${method}`, method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(data) }
+    };
+    return new Promise((resolve) => {
+      const req = https.request(options, (res) => {
+        let resBody = '';
+        res.on('data', (d) => resBody += d);
+        res.on('end', () => resolve(JSON.parse(resBody || '{}')));
+      });
+      req.write(data);
+      req.end();
+    });
+  };
+
+  const callFirestore = async (method, path, body = null) => {
+    const data = body ? JSON.stringify(body) : null;
+    const options = {
+      hostname: 'firestore.googleapis.com', port: 443,
+      path: `/v1/projects/${FIREBASE_ID}/databases/(default)/documents${path}?key=${API_KEY}`,
+      method: method,
+      headers: data ? { 'Content-Type': 'application/json' } : {}
+    };
+    return new Promise((resolve) => {
+      const req = https.request(options, (res) => {
+        let resBody = '';
+        res.on('data', (d) => resBody += d);
+        res.on('end', () => { try { resolve(JSON.parse(resBody)); } catch (e) { resolve({}); } });
+      });
+      if (data) req.write(data);
+      req.end();
+    });
+  };
+
+  try {
+    const update = JSON.parse(event.body);
+    const msg = update.message;
+    const cb = update.callback_query;
+    const chatId = msg ? msg.chat.id : (cb ? cb.message.chat.id : null);
+    if (!chatId) return { statusCode: 200 };
+
+    // --- CALLBACK QUERY ХЭСЭГ ---
+    if (cb) {
+      const data = cb.data;
+
+      if (data === "menu_invite") {
+        const inviteLink = `https://t.me/${BOT_USERNAME}?start=${chatId}`;
+        const userRes = await callFirestore('GET', `/users/${chatId}`);
+        const bonus = (userRes.fields && userRes.fields.bonusBalance) ? userRes.fields.bonusBalance.doubleValue : 0;
         
-        // GIF илгээж, message_id-г хадгалах (дараа нь устгахын тулд)
-        const sentLoading = await callTelegram('sendAnimation', { 
-          chat_id: chatId, 
-          animation: LOADING_GIF, 
-          caption: "✅ Шалгаж байна. Түр хүлээнэ үү." 
-        });
-
-        const nowTs = Date.now();
-        // loading_id-г Firestore-д хадгалснаар админ шийдвэр гаргахад устгах боломжтой болно
-        await callFirestore('PATCH', `/requests/${gId}?updateMask.fieldPaths=createdAt&updateMask.fieldPaths=loadingId`, {
-          fields: { 
-            createdAt: { stringValue: nowTs.toString() },
-            loadingId: { stringValue: sentLoading.result.message_id.toString() }
-          }
-        });
-        
-        await callTelegram('sendMessage', { 
-          chat_id: ADMIN_ID, 
-          text: `🔔 ЦЭНЭГЛЭХ ХҮСЭЛТ!\n🆔 ID: ${gId}\n📍 Код: ${tCode}\n👤 User: @${cb.from.username || 'unknown'}`,
-          reply_markup: { inline_keyboard: [[{ text: "✅ Зөвшөөрөх", callback_data: `adm_ok_dep_${chatId}_${gId}` }, { text: "❌ Татгалзах", callback_data: `adm_no_dep_${chatId}_${gId}` }]] }
-        });
-      }
-      else if (data.startsWith("adm_")) {
-        const [_, status, type, userId, targetId] = data.split("_");
-        const isApprove = status === "ok";
-        const res = await callFirestore('GET', `/requests/${targetId}`);
-        
-        // GIF-ийг устгах хэсэг
-        if (res.fields && res.fields.loadingId) {
-          await callTelegram('deleteMessage', { chat_id: userId, message_id: res.fields.loadingId.stringValue });
-        }
-
-        const createdAtStr = (res.fields && res.fields.createdAt) ? res.fields.createdAt.stringValue : null;
-        let isExpired = false;
-        if (createdAtStr) {
-          const diffSec = (Date.now() - parseInt(createdAtStr)) / 1000;
-          if (diffSec > 120) isExpired = true; 
-        }
-
-        if (isApprove && isExpired) {
-          await callTelegram('sendMessage', { chat_id: userId, text: "Уучлаарай гүйлгээний хугацаа дууссан байна. @Eegiimn-тэй холбогдоно уу." });
-          await callTelegram('editMessageText', { chat_id: ADMIN_ID, message_id: cb.message.message_id, text: `⚠️ ХУГАЦАА ХЭТЭРСЭН:\nID: ${targetId}` });
-        } else {
-          const finalStatus = isApprove ? "✅ ЗӨВШӨӨРӨГДӨВ" : "❌ ТАТГАЛЗАВ";
-          const userMsg = isApprove ? `Танны ${targetId} ID амжилттай цэнэглэгдлээ.` : "Уучлаарай, таны гүйлгээг цуцаллаа. @Eegiimn-тэй холбогдоно уу.";
-          await callTelegram('sendMessage', { chat_id: userId, text: userMsg });
-          await callTelegram('editMessageText', { chat_id: ADMIN_ID, message_id: cb.message.message_id, text: `🏁 ШИЙДВЭРЛЭГДЭВ:\nID: ${targetId}\nТөлөв: ${finalStatus}` });
-        }
-      }
-
-// ... (Deposit мессеж илгээх хэсэгт)
-      else if (!isNaN(text.replace(/\s/g, '')) && text.length >= 7 && text.length < 15) {
-        // ... (trxCode үүсгэх хэсэг хэвээрээ)
-        
-        const depositMsg = `🏦 Данс: MN370050099105952353\n🏦 MONPAY: ДАВААСҮРЭН\n\n📌 Утга: ${trxCode}\n\n⚠️ ГҮЙЛГЭЭНИЙ УТГАА ЗААВАЛ БИЧНЭ ҮҮ!\nДоод дүн 1,000₮\nДээд дүн 100,000₮\n\nГҮЙЛГЭЭ ХИЙСЭН ТОХИОЛДОЛД ДООРХ ТӨЛБӨР ТӨЛСӨН ГЭХ ТОВЧ ДЭЭР ДАРНА ҮҮ\n👇👇👇`;
-
-        await callTelegram('sendMessage', {
-          chat_id: chatId, 
-          text: depositMsg,
-          reply_markup: { inline_keyboard: [[{ text: "✅ Төлбөр төлсөн", callback_data: `paid_${gameId}_${trxCode}` }]] }
-        });
-
-        // Дансны дугаарыг тусад нь илгээх (Хэрэглэгч хуулж авахад хялбар)
         await callTelegram('sendMessage', {
           chat_id: chatId,
-          text: `370050099105952353`
+          text: `🎁 Найзыгаа уриад цэнэглэлт бүрийнх нь 3%-ийг аваарай!\n\n🔗 Таны урилгын линк:\n${inviteLink}\n\n💰 Таны бонус баланс: ${bonus}₮`
         });
       }
+      
+      else if (data.startsWith("adm_ok_dep_")) {
+        const [_, status, type, userId, targetId] = data.split("_");
+        // Админ зөвшөөрөх үед бонус бодох хэсэг
+        const res = await callFirestore('GET', `/requests/${targetId}`);
+        const amount = 10000; // Жишээ нь 10к, та үүнийг утгаас нь авч болно
+
+        // 1. Хэрэглэгчийг хэн урьсныг шалгах
+        const userRes = await callFirestore('GET', `/users/${userId}`);
+        if (userRes.fields && userRes.fields.invitedBy) {
+          const inviterId = userRes.fields.invitedBy.stringValue;
+          const bonusAmt = amount * 0.03; // 3% бонус
+
+          // 2. Урьсан хүний балансыг шинэчлэх
+          const inviterRes = await callFirestore('GET', `/users/${inviterId}`);
+          const currentBonus = (inviterRes.fields && inviterRes.fields.bonusBalance) ? inviterRes.fields.bonusBalance.doubleValue : 0;
+          
+          await callFirestore('PATCH', `/users/${inviterId}?updateMask.fieldPaths=bonusBalance`, {
+            fields: { bonusBalance: { doubleValue: currentBonus + bonusAmt } }
+          });
+
+          // 3. Урьсан хүнд мэдэгдэл хүргэх
+          await callTelegram('sendMessage', {
+            chat_id: inviterId,
+            text: `🎊 Таны урьсан найз цэнэглэлт хийлээ! Танд ${bonusAmt}₮ бонус орлоо.`
+          });
+        }
+        // ... (Бусад цэнэглэлт баталгаажуулах код)
+      }
+      // ... (Бусад callback логикууд)
+    }
+
+    // --- MESSAGE ХЭСЭГ ---
+    if (msg && msg.text) {
+      const text = msg.text.trim();
+
+      if (text.startsWith("/start")) {
+        const parts = text.split(" ");
+        // Хэрэв линкээр орж ирсэн бол (Жишээ нь: /start 12345)
+        if (parts.length > 1) {
+          const inviterId = parts[1];
+          if (inviterId !== chatId.toString()) { // Өөрийгөө урихаас сэргийлэх
+            await callFirestore('PATCH', `/users/${chatId}?updateMask.fieldPaths=invitedBy`, {
+              fields: { invitedBy: { stringValue: inviterId } }
+            });
+          }
+        }
+
+        await callTelegram('sendMessage', {
+          chat_id: chatId,
+          text: "Сайн байна уу? EEGII AUTOMAT 24/7\n\nНайзыгаа уриад 3% бонус аваарай!",
+          reply_markup: {
+            inline_keyboard: [
+              [{ text: "💰 Цэнэглэх", callback_data: "menu_deposit" }, { text: "💳 Татах", callback_data: "menu_withdraw" }],
+              [{ text: "🎁 Найзаа урих / Бонус", callback_data: "menu_invite" }]
+            ]
+          }
+        });
+      }
+      // ... (ID шалгах, бусад мессеж боловсруулах хэсэг)
+    }
+
+  } catch (err) { console.error(err); }
+  return { statusCode: 200, body: "OK" };
+};
